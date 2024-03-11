@@ -64,41 +64,45 @@ func main() {
 	}
 }
 
-// fetchRepositories makes an API request to Gitea, saves the raw response to a JSON file,
+// fetchRepositories makes an API request to Gitea to fetch all repositories for the user
 // and returns a list of repositories
 func fetchRepositories(giteaHost, giteaAccessToken string) ([]Repository, error) {
+	var allRepos []Repository
 	client := &http.Client{}
-	req, err := http.NewRequest("GET", giteaHost+userReposEndpoint, nil)
-	if err != nil {
-		return nil, err
+	page := 1
+	for {
+		req, err := http.NewRequest("GET", fmt.Sprintf("%s%s?page=%d", giteaHost, userReposEndpoint, page), nil)
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Add("Authorization", "token "+giteaAccessToken)
+		response, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer response.Body.Close()
+
+		if response.StatusCode != 200 {
+			return nil, fmt.Errorf("API request failed with HTTP status code: %d", response.StatusCode)
+		}
+
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		var repos []Repository
+		json.Unmarshal(body, &repos)
+
+		if len(repos) == 0 {
+			break
+		}
+
+		allRepos = append(allRepos, repos...)
+		page++
 	}
-
-	req.Header.Add("Authorization", "token "+giteaAccessToken)
-	response, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-
-	if response.StatusCode != 200 {
-		return nil, fmt.Errorf("API request failed with HTTP status code: %d", response.StatusCode)
-	}
-
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	// Save the raw API response to a file
-	// err = os.WriteFile("api_response.json", body, 0644)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("Error saving API response to file: %v", err)
-	// }
-
-	var repos []Repository
-	json.Unmarshal(body, &repos)
-
-	return repos, nil
+	return allRepos, nil
 }
 
 // gitClone uses the git command to clone a repository given its URL
