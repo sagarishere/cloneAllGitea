@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,10 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
+	"time"
 )
 
 const (
 	userReposEndpoint = "/api/v1/user/repos"
+	timeout           = 5 * time.Minute
 )
 
 // Repository represents the basic structure of a Gitea repository
@@ -21,8 +25,13 @@ type Repository struct {
 	FullName string `json:"full_name"`
 }
 
-func main() {
+// Result is a struct to hold the result of a clone operation
+type Result struct {
+	RepoName string
+	Err      error
+}
 
+func main() {
 	config, err := loadConfig("config.env")
 	if err != nil {
 		fmt.Printf("Error loading config: %v\n", err)
@@ -52,15 +61,42 @@ func main() {
 	// Total number of repositories
 	fmt.Printf("Found %d repositories\n", len(repos))
 
-	// Loop through repositories and clone if not already present
-	for _, repo := range repos {
-		if _, err := os.Stat(repo.FullName); !os.IsNotExist(err) {
-			fmt.Printf("Repo %s already exists, skipping.\n", repo.FullName)
-			continue
-		}
+	// Create a buffered channel with a capacity of the total number of repositories
+	resultsCh := make(chan Result, len(repos))
+	var wg sync.WaitGroup
 
-		fmt.Printf("Cloning %s from %s\n", repo.Name, repo.CloneURL)
-		gitClone(repo.CloneURL, repo.FullName)
+	// Loop through repositories and clone if not already present, using goroutines
+	for _, repo := range repos {
+		wg.Add(1)
+		go func(repo Repository) {
+			defer wg.Done()
+			// Create a new context with a timeout for each goroutine/request
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+
+			if _, err := os.Stat(repo.FullName); !os.IsNotExist(err) {
+				fmt.Printf("Repo %s already exists, skipping.\n", repo.FullName)
+				resultsCh <- Result{RepoName: repo.FullName, Err: nil}
+				return
+			}
+
+			fmt.Printf("Cloning %s from %s\n", repo.Name, repo.CloneURL)
+			err := gitClone(ctx, repo.CloneURL, repo.FullName)
+			resultsCh <- Result{RepoName: repo.FullName, Err: err}
+		}(repo)
+	}
+
+	// Start a goroutine to close resultsCh when all goroutines are done
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
+
+	// Process results as they come in
+	for res := range resultsCh {
+		if res.Err != nil {
+			fmt.Printf("Error cloning repository %s: %v\n", res.RepoName, res.Err)
+		}
 	}
 }
 
@@ -106,12 +142,13 @@ func fetchRepositories(giteaHost, giteaAccessToken string) ([]Repository, error)
 }
 
 // gitClone uses the git command to clone a repository given its URL
-func gitClone(cloneURL, addrToSave string) {
-	cmd := exec.Command("git", "clone", "-q", cloneURL, addrToSave)
-	err := cmd.Run()
-	if err != nil {
-		fmt.Printf("Error cloning repository: %v\n", err)
-	}
+// It respects the provided context, allowing it to be canceled or timeout
+func gitClone(ctx context.Context, cloneURL, addrToSave string) error {
+	// Create a command with context
+	cmd := exec.CommandContext(ctx, "git", "clone", cloneURL, addrToSave)
+
+	// Run the command and return any errors
+	return cmd.Run()
 }
 
 func loadConfig(path string) (map[string]string, error) {
